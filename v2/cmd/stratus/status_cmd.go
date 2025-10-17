@@ -3,10 +3,13 @@ package main
 import (
 	"github.com/datadog/stratus-red-team/v2/internal/state"
 	"github.com/datadog/stratus-red-team/v2/pkg/stratus"
+	"github.com/datadog/stratus-red-team/v2/pkg/stratus/runner"
 	"github.com/fatih/color"
 	"github.com/jedib0t/go-pretty/v6/table"
 	"github.com/spf13/cobra"
 )
+
+var statusCustomTerraformDir string
 
 func buildStatusCmd() *cobra.Command {
 	statusCmd := &cobra.Command{
@@ -28,6 +31,7 @@ func buildStatusCmd() *cobra.Command {
 			}
 		},
 	}
+	statusCmd.Flags().StringVarP(&statusCustomTerraformDir, "terraform-dir", "", "", "Path to a custom Terraform directory containing your own infrastructure prerequisites. When specified, this overrides the embedded Terraform code.")
 	return statusCmd
 }
 
@@ -35,8 +39,17 @@ func doStatusCmd(techniques []*stratus.AttackTechnique) {
 	t := GetDisplayTable()
 	t.AppendHeader(table.Row{"ID", "Name", "Status"})
 	for i := range techniques {
-		stateManager := state.NewFileSystemStateManager(techniques[i])
-		techniqueState := stateManager.GetTechniqueState()
+		var techniqueState stratus.AttackTechniqueState
+		if statusCustomTerraformDir != "" {
+			// For custom Terraform directories, use the runner to get the state
+			options := runner.RunnerOptions{CustomTerraformDir: statusCustomTerraformDir}
+			stratusRunner := runner.NewRunner(techniques[i], options)
+			techniqueState = stratusRunner.GetState()
+		} else {
+			// For embedded Terraform, use the state manager
+			stateManager := state.NewFileSystemStateManager(techniques[i])
+			techniqueState = stateManager.GetTechniqueState()
+		}
 		if techniqueState == "" {
 			techniqueState = stratus.AttackTechniqueStatusCold
 		}

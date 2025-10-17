@@ -1,10 +1,6 @@
-# Stratus Red Team
+# Stratus Red Team Forked
 
 [![made-with-Go](https://img.shields.io/badge/Made%20with-Go-1f425f.svg)](http://golang.org)  [![Tests](https://github.com/DataDog/stratus-red-team/actions/workflows/test.yml/badge.svg)](https://github.com/DataDog/stratus-red-team/actions/workflows/test.yml) [![static analysis](https://github.com/DataDog/stratus-red-team/actions/workflows/static-analysis.yml/badge.svg)](https://github.com/DataDog/stratus-red-team/actions/workflows/static-analysis.yml) ![Maintainer](https://img.shields.io/badge/maintainer-@christophetd-blue) [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/DataDog/stratus-red-team/badge)](https://api.securityscorecards.dev/projects/github.com/DataDog/stratus-red-team) [![CII Best Practices](https://bestpractices.coreinfrastructure.org/projects/6530/badge)](https://bestpractices.coreinfrastructure.org/projects/6530)
-
-<p align="center">
-  <img src="./docs/logo.png" alt="Stratus Red Team" width="300" />
-</p>
 
 Stratus Red Team is "[Atomic Red Team](https://github.com/redcanaryco/atomic-red-team)™" for the cloud, allowing to emulate offensive attack techniques in a granular and self-contained manner.
 
@@ -13,6 +9,42 @@ Stratus Red Team is "[Atomic Red Team](https://github.com/redcanaryco/atomic-red
     <img src="./docs/demo.gif" alt="Terminal recording" />
   </a>
 </p>
+
+## Overview
+
+Forked version allows you to specify custom Terraform directories containing your own infrastructure prerequisites. This is useful when:
+
+- You want to use your own existing infrastructure
+- You want to test attack techniques against your own infrastructure setup
+- You need to comply with specific organizational requirements
+
+## Usage
+
+### Basic Usage
+
+Use the `--terraform-dir` flag with any Stratus Red Team command:
+
+```bash
+
+# Build 
+cd v2
+go build -o stratus ./cmd/stratus
+
+# Warm up using custom infrastructure
+stratus warmup aws.persistence.iam-backdoor-user --terraform-dir ./examples/custom-infrastructure
+./stratus warmup aws.persistence.iam-backdoor-user --terraform-dir $TF_DIR
+
+# Detonate using custom infrastructure
+stratus detonate aws.persistence.iam-backdoor-user --terraform-dir ./examples/custom-infrastructure
+./stratus detonate aws.persistence.iam-backdoor-user --terraform-dir $TF_DIR
+
+# Clean up custom infrastructure
+stratus cleanup aws.persistence.iam-backdoor-user --terraform-dir ./examples/custom-infrastructure
+./stratus cleanup aws.persistence.iam-backdoor-user --terraform-dir $TF_DIR
+
+```
+
+-----
 
 Read the announcement blog posts:
 - https://www.datadoghq.com/blog/cyber-attack-simulation-with-stratus-red-team/

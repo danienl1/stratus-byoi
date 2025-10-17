@@ -20,6 +20,7 @@ type TerraformManager interface {
 	Initialize()
 	TerraformInitAndApply(directory string) (map[string]string, error)
 	TerraformDestroy(directory string) error
+	TerraformOutput(directory string) (map[string]string, error)
 }
 
 type TerraformManagerImpl struct {
@@ -108,4 +109,32 @@ func (m *TerraformManagerImpl) TerraformDestroy(directory string) error {
 	}
 
 	return terraform.Destroy(m.context)
+}
+
+func (m *TerraformManagerImpl) TerraformOutput(directory string) (map[string]string, error) {
+	terraform, err := tfexec.NewTerraform(directory, m.terraformBinaryPath)
+	if err != nil {
+		return map[string]string{}, errors.New("unable to instantiate Terraform: " + err.Error())
+	}
+
+	err = terraform.SetAppendUserAgent(m.terraformUserAgent)
+	if err != nil {
+		return map[string]string{}, errors.New("unable to configure Terraform: " + err.Error())
+	}
+
+	rawOutputs, err := terraform.Output(m.context)
+	if err != nil {
+		return map[string]string{}, errors.New("unable to get Terraform outputs: " + err.Error())
+	}
+
+	outputs := make(map[string]string, len(rawOutputs))
+	for outputName, outputRawValue := range rawOutputs {
+		outputValue := string(outputRawValue.Value)
+		// Strip the first and last quote which gets added for some reason
+		if len(outputValue) >= 2 && outputValue[0] == '"' && outputValue[len(outputValue)-1] == '"' {
+			outputValue = outputValue[1 : len(outputValue)-1]
+		}
+		outputs[outputName] = outputValue
+	}
+	return outputs, nil
 }

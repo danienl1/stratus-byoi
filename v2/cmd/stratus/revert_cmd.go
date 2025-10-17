@@ -2,15 +2,17 @@ package main
 
 import (
 	"errors"
-	"github.com/datadog/stratus-red-team/v2/pkg/stratus"
-	"github.com/datadog/stratus-red-team/v2/pkg/stratus/runner"
 	"log"
 	"os"
+
+	"github.com/datadog/stratus-red-team/v2/pkg/stratus"
+	"github.com/datadog/stratus-red-team/v2/pkg/stratus/runner"
 
 	"github.com/spf13/cobra"
 )
 
 var revertForce bool
+var revertCustomTerraformDir string
 
 func buildRevertCmd() *cobra.Command {
 	detonateCmd := &cobra.Command{
@@ -41,6 +43,7 @@ func buildRevertCmd() *cobra.Command {
 		},
 	}
 	detonateCmd.Flags().BoolVarP(&revertForce, "force", "f", false, "Force attempt to reverting even if the technique is not in the DETONATED state")
+	detonateCmd.Flags().StringVarP(&revertCustomTerraformDir, "terraform-dir", "", "", "Path to a custom Terraform directory containing your own infrastructure prerequisites. When specified, this overrides the embedded Terraform code.")
 	return detonateCmd
 }
 
@@ -75,7 +78,11 @@ func revertCmdWorker(techniques <-chan *stratus.AttackTechnique, errors chan<- e
 			errors <- nil
 			continue
 		}
-		stratusRunner := runner.NewRunner(technique, revertForce)
+		options := runner.RunnerOptions{
+			Force:              revertForce,
+			CustomTerraformDir: revertCustomTerraformDir,
+		}
+		stratusRunner := runner.NewRunner(technique, options)
 		err := stratusRunner.Revert()
 		errors <- err
 	}

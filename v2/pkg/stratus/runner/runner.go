@@ -2,27 +2,34 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"github.com/datadog/stratus-red-team/v2/internal/state"
-	"github.com/datadog/stratus-red-team/v2/pkg/stratus"
-	"github.com/datadog/stratus-red-team/v2/pkg/stratus/useragent"
-	"github.com/google/uuid"
+	"io/ioutil"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/datadog/stratus-red-team/v2/internal/state"
+	"github.com/datadog/stratus-red-team/v2/pkg/stratus"
+	"github.com/datadog/stratus-red-team/v2/pkg/stratus/useragent"
+	"github.com/google/uuid"
 )
 
-const StratusRunnerForce = true
-const StratusRunnerNoForce = false
-
 const EnvVarStratusRedTeamDetonationId = "STRATUS_RED_TEAM_DETONATION_ID"
+
+type RunnerOptions struct {
+	Force              bool
+	NoWarmup           bool
+	OutputsFile        string
+	CustomTerraformDir string
+}
 
 type runnerImpl struct {
 	Technique           *stratus.AttackTechnique
 	TechniqueState      stratus.AttackTechniqueState
 	TerraformDir        string
-	ShouldForce         bool
+	Options             RunnerOptions
 	TerraformManager    TerraformManager
 	StateManager        state.StateManager
 	ProviderFactory     stratus.CloudProviders
@@ -41,11 +48,11 @@ type Runner interface {
 
 var _ Runner = &runnerImpl{}
 
-func NewRunner(technique *stratus.AttackTechnique, force bool) Runner {
-	return NewRunnerWithContext(context.Background(), technique, force)
+func NewRunner(technique *stratus.AttackTechnique, options RunnerOptions) Runner {
+	return NewRunnerWithContext(context.Background(), technique, options)
 }
 
-func NewRunnerWithContext(ctx context.Context, technique *stratus.AttackTechnique, force bool) Runner {
+func NewRunnerWithContext(ctx context.Context, technique *stratus.AttackTechnique, options RunnerOptions) Runner {
 	stateManager := state.NewFileSystemStateManager(technique)
 
 	var correlationId = uuid.New()
@@ -61,7 +68,7 @@ func NewRunnerWithContext(ctx context.Context, technique *stratus.AttackTechniqu
 
 	runner := &runnerImpl{
 		Technique:           technique,
-		ShouldForce:         force,
+		Options:             options,
 		StateManager:        stateManager,
 		UniqueCorrelationID: correlationId,
 		TerraformManager: NewTerraformManagerWithContext(
@@ -75,7 +82,23 @@ func NewRunnerWithContext(ctx context.Context, technique *stratus.AttackTechniqu
 }
 
 func (m *runnerImpl) initialize() {
-	m.TerraformDir = filepath.Join(m.StateManager.GetRootDirectory(), m.Technique.ID)
+	// Use custom Terraform directory if specified, otherwise use the default state directory
+	if m.Options.CustomTerraformDir != "" {
+		// Convert relative paths to absolute paths to ensure they work regardless of working directory
+		if !filepath.IsAbs(m.Options.CustomTerraformDir) {
+			absPath, err := filepath.Abs(m.Options.CustomTerraformDir)
+			if err != nil {
+				log.Printf("Warning: unable to resolve absolute path for custom Terraform directory %s: %v", m.Options.CustomTerraformDir, err)
+				m.TerraformDir = m.Options.CustomTerraformDir
+			} else {
+				m.TerraformDir = absPath
+			}
+		} else {
+			m.TerraformDir = m.Options.CustomTerraformDir
+		}
+	} else {
+		m.TerraformDir = filepath.Join(m.StateManager.GetRootDirectory(), m.Technique.ID)
+	}
 	m.TechniqueState = m.StateManager.GetTechniqueState()
 	if m.TechniqueState == "" {
 		m.TechniqueState = stratus.AttackTechniqueStatusCold
@@ -85,20 +108,30 @@ func (m *runnerImpl) initialize() {
 
 func (m *runnerImpl) WarmUp() (map[string]string, error) {
 	// No prerequisites to spin-up
-	if m.Technique.PrerequisitesTerraformCode == nil {
+	if m.Technique.PrerequisitesTerraformCode == nil && m.Options.CustomTerraformDir == "" {
 		return map[string]string{}, nil
 	}
 
-	err := m.StateManager.ExtractTechnique()
-	if err != nil {
-		return nil, errors.New("unable to extract Terraform file: " + err.Error())
+	if m.Options.NoWarmup {
+		log.Println("Not warming up - --no-warmup was passed")
+		return m.readTerraformOutputs()
+	}
+
+	// Only extract embedded Terraform if not using custom directory
+	if m.Options.CustomTerraformDir == "" {
+		err := m.StateManager.ExtractTechnique()
+		if err != nil {
+			return nil, errors.New("unable to extract Terraform file: " + err.Error())
+		}
+	} else {
+		log.Println("Using custom Terraform directory: " + m.Options.CustomTerraformDir)
 	}
 
 	// We don't want to warm up the technique
 	var willWarmUp = true
 
 	// Technique is already warm
-	if m.TechniqueState == stratus.AttackTechniqueStatusWarm && !m.ShouldForce {
+	if m.TechniqueState == stratus.AttackTechniqueStatusWarm && !m.Options.Force {
 		log.Println("Not warming up - " + m.Technique.ID + " is already warm. Use --force to force")
 		willWarmUp = false
 	}
@@ -124,8 +157,10 @@ func (m *runnerImpl) WarmUp() (map[string]string, error) {
 		return nil, errors.New("unable to run terraform apply on prerequisite: " + errorMessageFromTerraformError(err))
 	}
 
-	// Persist outputs to disk
-	err = m.StateManager.WriteTerraformOutputs(outputs)
+	// Persist outputs to disk (only for embedded Terraform, not custom directories)
+	if m.Options.CustomTerraformDir == "" {
+		err = m.StateManager.WriteTerraformOutputs(outputs)
+	}
 	m.setState(stratus.AttackTechniqueStatusWarm)
 
 	if display, ok := outputs["display"]; ok {
@@ -142,7 +177,7 @@ func (m *runnerImpl) Detonate() error {
 
 	// If the attack technique has already been detonated, make sure it's idempotent
 	if m.GetState() == stratus.AttackTechniqueStatusDetonated {
-		if !m.Technique.IsIdempotent && !m.ShouldForce {
+		if !m.Technique.IsIdempotent && !m.Options.Force {
 			return errors.New(m.Technique.ID + " has already been detonated and is not idempotent. " +
 				"Revert it with 'stratus revert' before detonating it again, or use --force")
 		}
@@ -156,7 +191,12 @@ func (m *runnerImpl) Detonate() error {
 	if willWarmUp {
 		outputs, err = m.WarmUp()
 	} else {
-		outputs, err = m.StateManager.GetTerraformOutputs()
+		// For custom Terraform directories, get outputs directly from Terraform
+		if m.Options.CustomTerraformDir != "" {
+			outputs, err = m.TerraformManager.TerraformOutput(m.TerraformDir)
+		} else {
+			outputs, err = m.StateManager.GetTerraformOutputs()
+		}
 	}
 
 	if err != nil {
@@ -173,11 +213,18 @@ func (m *runnerImpl) Detonate() error {
 }
 
 func (m *runnerImpl) Revert() error {
-	if m.GetState() != stratus.AttackTechniqueStatusDetonated && !m.ShouldForce {
+	if m.GetState() != stratus.AttackTechniqueStatusDetonated && !m.Options.Force {
 		return errors.New(m.Technique.ID + " is not in DETONATED state and should not need to be reverted, use --force to force")
 	}
 
-	outputs, err := m.StateManager.GetTerraformOutputs()
+	// For custom Terraform directories, get outputs directly from Terraform
+	var outputs map[string]string
+	var err error
+	if m.Options.CustomTerraformDir != "" {
+		outputs, err = m.TerraformManager.TerraformOutput(m.TerraformDir)
+	} else {
+		outputs, err = m.StateManager.GetTerraformOutputs()
+	}
 	if err != nil {
 		return errors.New("unable to retrieve outputs of " + m.Technique.ID + ": " + err.Error())
 	}
@@ -198,17 +245,20 @@ func (m *runnerImpl) Revert() error {
 
 func (m *runnerImpl) CleanUp() error {
 	// Has the technique already been cleaned up?
-	if m.TechniqueState == stratus.AttackTechniqueStatusCold && !m.ShouldForce {
+	if m.TechniqueState == stratus.AttackTechniqueStatusCold && !m.Options.Force {
 		return errors.New(m.Technique.ID + " is already COLD and should already be clean, use --force to force cleanup")
 	}
 
 	log.Println("Cleaning up " + m.Technique.ID)
 
 	// Revert detonation
-	if m.Technique.Revert != nil && m.GetState() == stratus.AttackTechniqueStatusDetonated {
+	// For custom Terraform directories, always try to revert if there's a revert function
+	// since we can't reliably track state across sessions
+	shouldRevert := m.Technique.Revert != nil && (m.GetState() == stratus.AttackTechniqueStatusDetonated || m.Options.CustomTerraformDir != "")
+	if shouldRevert {
 		err := m.Revert()
 		if err != nil {
-			if m.ShouldForce {
+			if m.Options.Force {
 				log.Println("Warning: failed to revert detonation of " + m.Technique.ID + ". Ignoring and cleaning up anyway as --force was used.")
 			} else {
 				return errors.New("unable to revert detonation of " + m.Technique.ID + " before cleaning up (use --force to cleanup anyway): " + err.Error())
@@ -217,7 +267,7 @@ func (m *runnerImpl) CleanUp() error {
 	}
 
 	// Nuke prerequisites
-	if m.Technique.PrerequisitesTerraformCode != nil {
+	if (m.Technique.PrerequisitesTerraformCode != nil || m.Options.CustomTerraformDir != "") && !m.Options.NoWarmup {
 		log.Println("Cleaning up technique prerequisites with terraform destroy")
 		err := m.TerraformManager.TerraformDestroy(m.TerraformDir)
 		if err != nil {
@@ -230,23 +280,38 @@ func (m *runnerImpl) CleanUp() error {
 
 	m.setState(stratus.AttackTechniqueStatusCold)
 
-	// Remove terraform directory
-	err := m.StateManager.CleanupTechnique()
-	if err != nil {
-		return errors.New("unable to remove technique directory " + m.TerraformDir + ": " + err.Error())
+	// Only remove terraform directory if using embedded Terraform (not custom)
+	if m.Options.CustomTerraformDir == "" {
+		err := m.StateManager.CleanupTechnique()
+		if err != nil {
+			return errors.New("unable to remove technique directory " + m.TerraformDir + ": " + err.Error())
+		}
 	}
 
 	return nil
 }
 
 func (m *runnerImpl) GetState() stratus.AttackTechniqueState {
+	// For custom Terraform directories, we don't persist state to disk
+	// So we need to determine the state differently
+	if m.Options.CustomTerraformDir != "" {
+		// For custom directories, we can't reliably track state across sessions
+		// We'll assume COLD unless we're in the middle of a session
+		if m.TechniqueState == "" {
+			return stratus.AttackTechniqueStatusCold
+		}
+	}
 	return m.TechniqueState
 }
 
 func (m *runnerImpl) setState(state stratus.AttackTechniqueState) {
-	err := m.StateManager.SetTechniqueState(state)
-	if err != nil {
-		log.Println("Warning: unable to set technique state: " + err.Error())
+	// For custom Terraform directories, we don't persist state to disk
+	// The state is only tracked in memory for the current session
+	if m.Options.CustomTerraformDir == "" {
+		err := m.StateManager.SetTechniqueState(state)
+		if err != nil {
+			log.Println("Warning: unable to set technique state: " + err.Error())
+		}
 	}
 	m.TechniqueState = state
 }
@@ -254,6 +319,27 @@ func (m *runnerImpl) setState(state stratus.AttackTechniqueState) {
 // GetUniqueExecutionId returns an unique execution ID, unique for each runner instance
 func (m *runnerImpl) GetUniqueExecutionId() string {
 	return m.UniqueCorrelationID.String()
+}
+
+func (m *runnerImpl) readTerraformOutputs() (map[string]string, error) {
+	if m.Options.OutputsFile == "" {
+		return nil, errors.New("you must specify --outputs-file when using --no-warmup")
+	}
+
+	// Read the file
+	bytes, err := ioutil.ReadFile(m.Options.OutputsFile)
+	if err != nil {
+		return nil, errors.New("unable to read terraform outputs file: " + err.Error())
+	}
+
+	// Unmarshal the JSON
+	var outputs map[string]string
+	err = json.Unmarshal(bytes, &outputs)
+	if err != nil {
+		return nil, errors.New("unable to parse terraform outputs file: " + err.Error())
+	}
+
+	return outputs, nil
 }
 
 // Utility function to display better error messages than the Terraform ones

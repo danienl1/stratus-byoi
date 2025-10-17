@@ -2,15 +2,17 @@ package main
 
 import (
 	"errors"
+	"log"
+	"os"
+
 	"github.com/datadog/stratus-red-team/v2/pkg/stratus"
 	"github.com/datadog/stratus-red-team/v2/pkg/stratus/runner"
 	"github.com/spf13/cobra"
-	"log"
-	"os"
 )
 
 var flagForceCleanup bool
 var flagCleanupAll bool
+var cleanupCustomTerraformDir string
 
 func buildCleanupCmd() *cobra.Command {
 	cleanupCmd := &cobra.Command{
@@ -51,6 +53,7 @@ func buildCleanupCmd() *cobra.Command {
 	}
 	cleanupCmd.Flags().BoolVarP(&flagForceCleanup, "force", "f", false, "Force cleanup even if the technique is already COLD")
 	cleanupCmd.Flags().BoolVarP(&flagCleanupAll, "all", "", false, "Clean up all techniques that are not in COLD state")
+	cleanupCmd.Flags().StringVarP(&cleanupCustomTerraformDir, "terraform-dir", "", "", "Path to a custom Terraform directory containing your own infrastructure prerequisites. When specified, this overrides the embedded Terraform code.")
 	return cleanupCmd
 }
 
@@ -75,7 +78,11 @@ func doCleanupCmd(techniques []*stratus.AttackTechnique) {
 
 func cleanupCmdWorker(techniques <-chan *stratus.AttackTechnique, errors chan<- error) {
 	for technique := range techniques {
-		stratusRunner := runner.NewRunner(technique, flagForceCleanup)
+		options := runner.RunnerOptions{
+			Force:              flagForceCleanup,
+			CustomTerraformDir: cleanupCustomTerraformDir,
+		}
+		stratusRunner := runner.NewRunner(technique, options)
 		err := stratusRunner.CleanUp()
 		errors <- err
 	}

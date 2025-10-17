@@ -2,13 +2,15 @@ package main
 
 import (
 	"errors"
+	"os"
+
 	"github.com/datadog/stratus-red-team/v2/pkg/stratus"
 	"github.com/datadog/stratus-red-team/v2/pkg/stratus/runner"
 	"github.com/spf13/cobra"
-	"os"
 )
 
 var forceWarmup bool
+var warmupCustomTerraformDir string
 
 func buildWarmupCmd() *cobra.Command {
 	warmupCmd := &cobra.Command{
@@ -39,6 +41,7 @@ func buildWarmupCmd() *cobra.Command {
 		},
 	}
 	warmupCmd.Flags().BoolVarP(&forceWarmup, "force", "f", false, "Force re-ensuring the prerequisite infrastructure or configuration is up to date")
+	warmupCmd.Flags().StringVarP(&warmupCustomTerraformDir, "terraform-dir", "", "", "Path to a custom Terraform directory containing your own infrastructure prerequisites. When specified, this overrides the embedded Terraform code.")
 	return warmupCmd
 }
 
@@ -62,7 +65,11 @@ func doWarmupCmd(techniques []*stratus.AttackTechnique) {
 
 func warmupCmdWorker(techniques <-chan *stratus.AttackTechnique, errors chan<- error) {
 	for technique := range techniques {
-		stratusRunner := runner.NewRunner(technique, forceWarmup)
+		options := runner.RunnerOptions{
+			Force:              forceWarmup,
+			CustomTerraformDir: warmupCustomTerraformDir,
+		}
+		stratusRunner := runner.NewRunner(technique, options)
 		_, err := stratusRunner.WarmUp()
 		errors <- err
 	}
